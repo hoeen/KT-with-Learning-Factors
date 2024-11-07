@@ -47,24 +47,21 @@ class KnowledgeLevel(Module):
         
         
         C_mask = (C==1)
-        for t in tqdm(range(self.num_times)):
-            for i in range(self.num_learners):
-                for j in range(self.num_topics):
-                    if C_mask[t, i, j]:
-                        V_j = V_j_matrix[j]
+        C_indices = torch.where(C_mask)
 
-                        U_t_i = U_t_i_matrix[t, i, :, :]
+        for t,i,j in zip(*C_indices):
+            V_j = V_j_matrix[j]
 
-                        print(U_t_i_matrix.squeeze(-1)[t, i, :])
-                        print(U_t_i.squeeze(-1))
-                        inner_product = U_t_i.squeeze(-1)@V_j
-                        inner_product = self.sigmoid(inner_product)
-                        
-                        normal_dist = torch.distributions.Normal(inner_product, self.sigma2_R)
+            U_t_i = U_t_i_matrix[t, i, :, :]
 
-                        log_prob = normal_dist.log_prob(R[t, i, j])
-                        log_likelihood += log_prob.sum()
+            inner_product = U_t_i.squeeze(-1)@V_j
+            inner_product = self.sigmoid(inner_product)
+            
+            normal_dist = torch.distributions.Normal(inner_product, self.sigma2_R)
 
+            log_prob = normal_dist.log_prob(R[t, i, j])
+            log_likelihood += log_prob.sum()
+        
         return log_likelihood
 
     def train_model(
