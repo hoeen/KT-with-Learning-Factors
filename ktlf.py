@@ -12,6 +12,9 @@ from torch.optim import SGD, Adam
 
 from data_loader import Dataset
 
+SATURATION_M = 6
+SATURATION_H = 2
+
 class KnowledgeLevel(Module):
     def __init__(self, num_learners, num_topics, num_kc, num_times):
         super(KnowledgeLevel, self).__init__()
@@ -117,48 +120,66 @@ class FutureKnowledge(Module):
         self.alpha = Parameter(torch.rand((num_learners,))).to(self.device)
         self.lstm_layer = LSTM(
             self.num_kcs * 5, self.hidden_size, batch_first=True
-        )
-        self.out_layer = Linear(self.hidden_size, self.num_kcs * 5)
-        self.U_embedding = Linear(self.dim, 1)
-        self.sigmoid = Sigmoid()
+        ).to(self.device)
+        self.out_layer = Linear(self.hidden_size, self.num_kcs * 5).to(self.device)
+        self.U_embedding = Linear(self.dim, 1).to(self.device)
+        self.sigmoid = Sigmoid().to(self.device)
 
         self.y = None
         
-    def forward(self, U, V, Fshift, delta):
+    def forward(self, U, V, Fshift, delta, alpha):
         
-        deltashift = delta[1:]
+        deltashift = delta[1:].to(self.device)
         
-        U = U[1:,:,:,:].to(self.device) # 시간 shift
-        U_reshaped = U.view(-1, U.size(1), U.size(2) * U.size(3))
+        U_past = U[:-1].to(self.device)
+        U_shift = U[1:].to(self.device) # 시간 shift
+        U_reshaped = U_shift.view(-1, U_shift.size(1), U_shift.size(2) * U_shift.size(3))
         h, _ = self.lstm_layer(U_reshaped)
         output = self.out_layer(h)
-        U = output.view(U.size(0), U.size(1), U.size(2), U.size(3))
+        U_shift = output.view(U_shift.size(0), U_shift.size(1), U_shift.size(2), U_shift.size(3))
                     
-        for t in range(U.size(0)-1): # 시간별
-            for i in range(U.size(1)):
-                for k in range(self.num_kcs):
-                    memory_factor = self.alpha[i] * U[:-1][t, i, k] * (Fshift[t,i,k] / (Fshift[t,i,k] + 1e-5))
-                    forgetting_factor = (1 - self.alpha[i]) * U[:-1][t, i, k] * torch.exp(-deltashift[t, i, k].clone().detach() / 1.0)
+        Fshift = Fshift.to(self.device)
+        # memory_factor와 forgetting_factor를 텐서 연산으로 계산
+        # print(alpha.unsqueeze(1)) # 1160, 1 => 928, 1
+        alpha_reshaped = alpha.view(1,alpha.size(0),1,1)
+        memory_factor = alpha_reshaped *U_past * SATURATION_M*(Fshift / (Fshift + SATURATION_H)).unsqueeze(-1)
+        forgetting_factor = (torch.ones(alpha_reshaped.shape).to(self.device) - alpha_reshaped) * U_past * torch.exp(-deltashift.unsqueeze(-1) / 1.0)
+
+        # U를 업데이트 (t+1번째를 계산할 때는 슬라이싱 활용)
+        # U[1:] = memory_factor + forgetting_factor
+        U_new = torch.zeros_like(U)  # U와 같은 크기의 텐서 생성
+        U_new[1:] = memory_factor + forgetting_factor
+       
                     
-                    U_new = memory_factor + forgetting_factor
-                    U = U.clone()
-                    U[t][i][k] = U_new
+        # for t in range(U_shift.size(0)): # 시간별
+        #     for i in range(U.size(1)): # 사용자별
+        #         for k in range(self.num_kcs):
+        #             memory_factor = self.alpha[i] * U_past[t, i, k] * (Fshift[t,i,k] / (Fshift[t,i,k] + 1e-5))
+        #             forgetting_factor = (1 - self.alpha[i]) * U_past[t, i, k] * torch.exp(-deltashift[t, i, k].clone().detach() / 1.0)
+                    
+        #             U[t+1][i][k] = memory_factor + forgetting_factor
                     
         if self.y is None:
-            self.y = torch.zeros((U.size(0), U.size(1), V.size(0)),
+            self.y = torch.zeros((U_shift.size(0), U_new.size(1), V.size(0)),
                                  requires_grad=True, device=U.device)
         y = torch.zeros_like(self.y) # test 에서 이것때문에 shape 안맞음
 
-        for t in range(U.size(0)):
-            for i in range(U.size(1)):
-                for j in range(V.size(0)):
-                    V_j = V[j]
-                    U_t_i = self.U_embedding(U[t, i, :, :]) 
 
-                    inner_product = U_t_i.squeeze(-1)@V_j
-                    inner_product = self.sigmoid(inner_product)
+        U_t_i = self.U_embedding(U_new[1:, :, :, :]) 
 
-                    y[t,i,j] = inner_product
+        inner_product = U_t_i.squeeze(-1)@V.T
+        y = self.sigmoid(inner_product)
+
+        # for t in range(U_shift.size(0)):
+        #     for i in range(U.size(1)):
+        #         for j in range(V.size(0)):
+        #             V_j = V[j]
+        #             U_t_i = self.U_embedding(U[t+1, i, :, :]) 
+
+        #             inner_product = U_t_i.squeeze(-1)@V_j
+        #             inner_product = self.sigmoid(inner_product)
+
+        #             y[t,i,j] = inner_product
                     
         return y
   
@@ -179,17 +200,31 @@ class FutureKnowledge(Module):
         U_test = U[:,-test_users:, :,:]
         
         T = F.size(0) - 1
+        F_mask = (F > 0)
+        F_indices = torch.where(F_mask)
+        # print("F_indices", F_indices)
         delta = torch.zeros(F.size(0), F.size(1), F.size(2))
-        for t in range(F.size(0)):
-            for i in range(U.size(1)):  # 각 학습자에 대해
-                for k in range(U.size(2)):  # 각 지식 개념에 대해
-                    for past in range(t-1, -1, -1):  # T-1 시점부터 역순으로
-                        if F[past, i, k] > 0:
-                            delta[t][i][k] = t - past
-                            break
-                        # 이전에 학습하지 않은 KC는 간격을 0으로 유지
-                        else:
-                            delta[t][i][k] = 0
+        
+        for t,i,k in zip(*F_indices):
+            for past in range(t-1, -1, -1):  # T-1 시점부터 역순으로
+                if F_mask[past, i, k]:
+                    delta[t][i][k] = t - past
+                    break
+                # 이전에 학습하지 않은 KC는 간격을 0으로 유지
+                else:
+                    delta[t][i][k] = 0
+    
+        
+        # for t in range(F.size(0)):
+        #     for i in range(U.size(1)):  # 각 학습자에 대해
+        #         for k in range(U.size(2)):  # 각 지식 개념에 대해
+        #             for past in range(t-1, -1, -1):  # T-1 시점부터 역순으로
+        #                 if F_mask[past, i, k]:
+        #                     delta[t][i][k] = t - past
+        #                     break
+        #                 # 이전에 학습하지 않은 KC는 간격을 0으로 유지
+        #                 else:
+        #                     delta[t][i][k] = 0
 
         Fshift = F[1:] 
         F = F[:-1]
@@ -198,7 +233,9 @@ class FutureKnowledge(Module):
         for i in range(1, self.epoch + 1):
             loss_mean = []
 
-            y = self(U_train, V, Fshift[:,:train_users], delta[:,:train_users, :])
+            R = R.to(self.device)
+            
+            y = self(U_train, V, Fshift[:,:train_users], delta[:,:train_users, :], self.alpha[:train_users])
             
             mask = (R[1:, :train_users] != -1)
             
@@ -227,7 +264,7 @@ class FutureKnowledge(Module):
                 self.eval()
 
 
-                y = self(U_test, V, Fshift[:,-test_users:], delta[:,-test_users:, :])
+                y = self(U_test, V, Fshift[:,-test_users:], delta[:,-test_users:, :], self.alpha[-test_users:])
 
                 test_y = y[:,:test_users]
                 mask = (R[1:, -test_users:] != -1)
@@ -259,6 +296,8 @@ class FutureKnowledge(Module):
 
        
 if __name__ == '__main__':
+    # torch.autograd.set_detect_anomaly(True)
+    
     dataset = Dataset("/home/datasets")
     Q, R, C, F, learners, topics, times = \
         dataset.Q, dataset.R, dataset.C, dataset.F, dataset.learners, dataset.topics, dataset.times
