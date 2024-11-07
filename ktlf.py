@@ -16,22 +16,26 @@ class KnowledgeLevel(Module):
     def __init__(self, num_learners, num_topics, num_kc, num_times):
         super(KnowledgeLevel, self).__init__()
 
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cpu':
+            print("cuda is currently not available. Please check CUDA connection. Using CPU...")
+
         self.num_learners = num_learners
         self.num_topics = num_topics
         self.num_kc = num_kc
         self.num_times = num_times
         self.dim = 5
 
-        self.epoch = 10 # TODO
+        self.epoch = 2 # TODO
         self.sigma_V = 0.1
         self.sigma2_R = 0.1
 
-        self.neighbor_weights = Parameter(torch.randn((num_topics, num_topics)))
+        self.neighbor_weights = Parameter(torch.randn((num_topics, num_topics))).to(self.device)
 
-        self.V = Parameter(torch.randn((self.num_topics, self.num_kc), dtype=torch.float32))
+        self.V = Parameter(torch.randn((self.num_topics, self.num_kc), dtype=torch.float32)).to(self.device)
 
-        self.U_embedding = Linear(self.dim, 1)
-        self.U = Parameter(torch.randn((self.num_times, self.num_learners, self.num_kc, self.dim), dtype=torch.float32))
+        self.U_embedding = Linear(self.dim, 1).to(self.device)
+        self.U = Parameter(torch.randn((self.num_times, self.num_learners, self.num_kc, self.dim), dtype=torch.float32)).to(self.device)
 
         self.sigmoid = Sigmoid()
 
@@ -71,19 +75,19 @@ class KnowledgeLevel(Module):
         self.train()
 
         for epoch in range(1, self.epoch+1):
-            mask = (Q.unsqueeze(1) * Q.unsqueeze(0)).bool().any(dim=-1)
+            mask = (Q.unsqueeze(1) * Q.unsqueeze(0)).bool().any(dim=-1).to(self.device)
             neighbor_weights = self.neighbor_weights.masked_fill(~mask, 0.0)
 
             V_new = torch.zeros_like(self.V)
 
             for j in range(self.num_topics):
-                V_j_new = torch.zeros(self.num_kc, dtype=torch.float32)
+                V_j_new = torch.zeros(self.num_kc, dtype=torch.float32).to(self.device)
                 for d in range(mask.size(1)):
                     if mask[j,d]:
                         V_d = self.V[d, :]
                         V_j_new += neighbor_weights[j, d] * V_d
 
-                theta_V = torch.normal(mean=0, std=self.sigma_V, size=(self.num_kc,))
+                theta_V = torch.normal(mean=0, std=self.sigma_V, size=(self.num_kc,)).to(self.device)
 
                 V_new[j, :] = V_j_new + theta_V
 
@@ -100,14 +104,17 @@ class KnowledgeLevel(Module):
 class FutureKnowledge(Module):
     def __init__(self, num_learners, num_kcs):
         super().__init__()
+        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if self.device == 'cpu':
+            print("cuda is currently not available. Please check CUDA connection. Using CPU...")
         self.num_learners = num_learners
         self.num_kcs = num_kcs
         self.emb_size = 100
         self.hidden_size = 100
-        self.epoch = 10 # TODO
+        self.epoch = 2 # TODO
         self.dim = 5
 
-        self.alpha = Parameter(torch.rand((num_learners,)))
+        self.alpha = Parameter(torch.rand((num_learners,))).to(self.device)
         self.lstm_layer = LSTM(
             self.num_kcs * 5, self.hidden_size, batch_first=True
         )
@@ -121,7 +128,7 @@ class FutureKnowledge(Module):
         
         deltashift = delta[1:]
         
-        U = U[1:,:,:,:] # 시간 shift
+        U = U[1:,:,:,:].to(self.device) # 시간 shift
         U_reshaped = U.view(-1, U.size(1), U.size(2) * U.size(3))
         h, _ = self.lstm_layer(U_reshaped)
         output = self.out_layer(h)

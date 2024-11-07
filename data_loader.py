@@ -8,7 +8,8 @@ from tqdm import tqdm
 class Dataset(Dataset):
     def __init__(self, dataset_dir):
         super().__init__()
-        self.history = os.path.join(dataset_dir,'learning_record.csv')
+        self.dataset_dir = dataset_dir
+        self.history = os.path.join(self.dataset_dir,'learning_record.csv')
         self.Q, self.R, self.C, self.F, self.learners, self.topics, self.times = self.preprocess()
 
         self.num_learners = len(self.learners)
@@ -43,7 +44,7 @@ class Dataset(Dataset):
         topics = sorted(history['Topic'].unique())
         times = sorted(history['Time'].unique())
         
-        Q_df = pd.read_csv('/home/datasets/knowledge_incidence_matrix.csv')
+        Q_df = pd.read_csv(os.path.join(self.dataset_dir, 'knowledge_incidence_matrix.csv'))
         Q = Q_df.values
         sort_index = [topics.index(item) for item in Q[:, 0]]
         sorted_arr = Q[np.argsort(sort_index)]
