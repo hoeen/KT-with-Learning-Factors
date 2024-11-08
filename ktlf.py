@@ -11,9 +11,18 @@ from torch.nn.functional import one_hot, binary_cross_entropy
 from torch.optim import SGD, Adam
 
 from data_loader import Dataset
+import wandb
+
+from utils import setSeeds
+
+
+setSeeds()
+wandb.login()
+wandb.init(project="keit")
 
 SATURATION_M = 6
 SATURATION_H = 2
+
 
 class KnowledgeLevel(Module):
     def __init__(self, num_learners, num_topics, num_kc, num_times):
@@ -29,7 +38,7 @@ class KnowledgeLevel(Module):
         self.num_times = num_times
         self.dim = 5
 
-        self.epoch = 2 # TODO
+        self.epoch = 10 # TODO
         self.sigma_V = 0.1
         self.sigma2_R = 0.1
 
@@ -67,7 +76,7 @@ class KnowledgeLevel(Module):
             normal_dist = torch.distributions.Normal(inner_product, self.sigma2_R)
 
             log_prob = normal_dist.log_prob(R[t, i, j])
-            log_likelihood += log_prob.sum()
+            log_likelihood += log_prob.mean()
         
         return log_likelihood
 
@@ -114,7 +123,7 @@ class FutureKnowledge(Module):
         self.num_kcs = num_kcs
         self.emb_size = 100
         self.hidden_size = 100
-        self.epoch = 2 # TODO
+        self.epoch = 130 # TODO
         self.dim = 5
 
         self.alpha = Parameter(torch.rand((num_learners,))).to(self.device)
@@ -132,54 +141,31 @@ class FutureKnowledge(Module):
         deltashift = delta[1:].to(self.device)
         
         U_past = U[:-1].to(self.device)
-        U_shift = U[1:].to(self.device) # 시간 shift
+        U_shift = U[1:].to(self.device)
         U_reshaped = U_shift.view(-1, U_shift.size(1), U_shift.size(2) * U_shift.size(3))
         h, _ = self.lstm_layer(U_reshaped)
         output = self.out_layer(h)
         U_shift = output.view(U_shift.size(0), U_shift.size(1), U_shift.size(2), U_shift.size(3))
                     
         Fshift = Fshift.to(self.device)
-        # memory_factor와 forgetting_factor를 텐서 연산으로 계산
-        # print(alpha.unsqueeze(1)) # 1160, 1 => 928, 1
         alpha_reshaped = alpha.view(1,alpha.size(0),1,1)
         memory_factor = alpha_reshaped *U_past * SATURATION_M*(Fshift / (Fshift + SATURATION_H)).unsqueeze(-1)
         forgetting_factor = (torch.ones(alpha_reshaped.shape).to(self.device) - alpha_reshaped) * U_past * torch.exp(-deltashift.unsqueeze(-1) / 1.0)
 
-        # U를 업데이트 (t+1번째를 계산할 때는 슬라이싱 활용)
-        # U[1:] = memory_factor + forgetting_factor
-        U_new = torch.zeros_like(U)  # U와 같은 크기의 텐서 생성
+        U_new = torch.zeros_like(U) 
         U_new[1:] = memory_factor + forgetting_factor
        
-                    
-        # for t in range(U_shift.size(0)): # 시간별
-        #     for i in range(U.size(1)): # 사용자별
-        #         for k in range(self.num_kcs):
-        #             memory_factor = self.alpha[i] * U_past[t, i, k] * (Fshift[t,i,k] / (Fshift[t,i,k] + 1e-5))
-        #             forgetting_factor = (1 - self.alpha[i]) * U_past[t, i, k] * torch.exp(-deltashift[t, i, k].clone().detach() / 1.0)
-                    
-        #             U[t+1][i][k] = memory_factor + forgetting_factor
                     
         if self.y is None:
             self.y = torch.zeros((U_shift.size(0), U_new.size(1), V.size(0)),
                                  requires_grad=True, device=U.device)
-        y = torch.zeros_like(self.y) # test 에서 이것때문에 shape 안맞음
+        y = torch.zeros_like(self.y)
 
 
         U_t_i = self.U_embedding(U_new[1:, :, :, :]) 
 
         inner_product = U_t_i.squeeze(-1)@V.T
         y = self.sigmoid(inner_product)
-
-        # for t in range(U_shift.size(0)):
-        #     for i in range(U.size(1)):
-        #         for j in range(V.size(0)):
-        #             V_j = V[j]
-        #             U_t_i = self.U_embedding(U[t+1, i, :, :]) 
-
-        #             inner_product = U_t_i.squeeze(-1)@V_j
-        #             inner_product = self.sigmoid(inner_product)
-
-        #             y[t,i,j] = inner_product
                     
         return y
   
@@ -193,7 +179,6 @@ class FutureKnowledge(Module):
         
         Q, R, C, F, N, M, T = data
         
-        ### # 사용자 기준으로 Train / Test 쪼개기 # TODO
         train_users = math.floor(U.size(1) * 0.8)
         test_users = math.ceil(U.size(1) * 0.2)
         U_train = U[:,:train_users, :,:]
@@ -202,29 +187,16 @@ class FutureKnowledge(Module):
         T = F.size(0) - 1
         F_mask = (F > 0)
         F_indices = torch.where(F_mask)
-        # print("F_indices", F_indices)
+
         delta = torch.zeros(F.size(0), F.size(1), F.size(2))
         
         for t,i,k in zip(*F_indices):
-            for past in range(t-1, -1, -1):  # T-1 시점부터 역순으로
+            for past in range(t-1, -1, -1): 
                 if F_mask[past, i, k]:
                     delta[t][i][k] = t - past
                     break
-                # 이전에 학습하지 않은 KC는 간격을 0으로 유지
                 else:
                     delta[t][i][k] = 0
-    
-        
-        # for t in range(F.size(0)):
-        #     for i in range(U.size(1)):  # 각 학습자에 대해
-        #         for k in range(U.size(2)):  # 각 지식 개념에 대해
-        #             for past in range(t-1, -1, -1):  # T-1 시점부터 역순으로
-        #                 if F_mask[past, i, k]:
-        #                     delta[t][i][k] = t - past
-        #                     break
-        #                 # 이전에 학습하지 않은 KC는 간격을 0으로 유지
-        #                 else:
-        #                     delta[t][i][k] = 0
 
         Fshift = F[1:] 
         F = F[:-1]
@@ -242,8 +214,6 @@ class FutureKnowledge(Module):
             y = torch.masked_select(y, mask)
             t = torch.masked_select(R[1:, :train_users], mask)
 
-            # print("predict: ", y)
-            # print("target: ", t)
             optimizer.zero_grad()
             loss = binary_cross_entropy(y, t)
             loss.backward()
@@ -251,15 +221,12 @@ class FutureKnowledge(Module):
 
             loss_mean.append(loss.detach().cpu().numpy())
             
-            predicted_labels = (y >= 0.5).float()
+            predicted_labels = (y >= 0.2).float()
             target_labels = (t >= 0.5).float()
-            acc = (predicted_labels == target_labels).sum().item() / t.numel()
+            train_acc = (predicted_labels == target_labels).sum().item() / t.numel()
 
-
-            print(f"Epoch {i}/{self.epoch}, Loss: {loss.item()}, ACC: {acc}")
+            print(f"Epoch {i}/{self.epoch}, Loss: {loss.item()}, ACC: {train_acc}")
             
-            
-
             with torch.no_grad():
                 self.eval()
 
@@ -272,31 +239,27 @@ class FutureKnowledge(Module):
                 y = torch.masked_select(test_y, mask)
                 t = torch.masked_select(R[1:, -test_users:], mask)
 
-                predicted_labels = (y >= 0.5).float()
+                predicted_labels = (y >= 0.2).float()
                 target_labels = (t >= 0.5).float()
-                acc = (predicted_labels == target_labels).sum().item() / t.numel()
+                test_acc = (predicted_labels == target_labels).sum().item() / t.numel()
                 
-                loss_mean = np.mean(loss_mean) ## 에러
-                print(f"TEST ACC: {acc}")
-                
-                
-                # if auc > max_auc:
-                #     torch.save(
-                #         self.state_dict(),
-                #         os.path.join(
-                #             ckpt_path, "model.ckpt"
-                #         )
-                #     )
-                #     max_auc = auc
+                loss_mean = np.mean(loss_mean)
+                print(f"TEST ACC: {test_acc}")
+            
 
-                # aucs.append(auc)
-                # loss_means.append(loss_mean)
-
+            wandb.log(
+                {
+                    "epoch": i,
+                    "train_loss": loss,
+                    "train_acc_epoch": train_acc,
+                    "test_acc_epoch": test_acc,
+                }
+            )
+            
         return aucs, loss_means
 
        
 if __name__ == '__main__':
-    # torch.autograd.set_detect_anomaly(True)
     
     dataset = Dataset("/home/datasets")
     Q, R, C, F, learners, topics, times = \
@@ -310,8 +273,6 @@ if __name__ == '__main__':
     
     U = prob_model.U
     V = prob_model.V
-    # print("U", U, U.shape)
-    # print("V", V, V.shape)
     
     print("\n#### [Future Knowledge Prediction] ####")
     predict_model = FutureKnowledge(dataset.num_learners, dataset.num_kc)

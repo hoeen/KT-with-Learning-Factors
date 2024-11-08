@@ -18,8 +18,8 @@ class Dataset(Dataset):
         self.num_times = len(self.times)
 
     def preprocess(self):
-        # TODO: 실제 데이터로 갈아끼우기
         history = pd.read_csv(self.history)
+        history['Time'] = pd.to_datetime(history['Time']).dt.strftime("%Y-%m-%d")
 
         # data = [
         #     {'Learner': 'u1', 'Topic': 'e2', 'Time': 't2', 'Score': 0.25},
