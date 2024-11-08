@@ -25,5 +25,7 @@ requirements.txt 참조
 TEST Accuracy 0.77 달성 
 
 **train loss & accuracy**
+
 ![](./train_loss.png)
+
 ![](./train_test_acc.png)
