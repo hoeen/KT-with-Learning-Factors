@@ -1,5 +1,6 @@
 # KEIT KT with Learning Factors
 
+(Pytorch implementation)
 지식추적 모델 구현 담당자 : 박우석 연구원, 박나연 연구원
 
 ## Model Reference 
